@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
-r"""QR & Barcode Toolkit -- a tkinter GUI on top of the ``qrkit`` API.
+r"""QR & Barcode Toolkit -- an Aura (QuickOpen design system) GUI on top of the
+``qrkit`` API.
 
-A single main window: a left sidebar (Generate QR, Barcode, Scan, Batch) and a
-main panel that swaps to the selected tool.  Every operation calls the tested
-core library (never re-implements QR/barcode logic) and runs on a background
-thread so the UI stays responsive; results are marshalled back with
-``self.after`` and shown in an inline result bar -- an output path plus an "Open
-folder" button on success, or the ``QRKitError`` message (never a traceback) on
-failure.  Generated and scanned images are previewed with Pillow's ``ImageTk``.
+A single Aura window: sidebar sections for the four tools (QR code, Barcode,
+Scan image, Batch from CSV) plus About.  Every operation calls the tested core
+library (never re-implements QR/barcode logic) and runs on a background thread
+so the UI stays responsive; the worker never touches tkinter -- it fills a
+``queue.Queue`` that the main thread polls with ``self.after`` -- and results
+land in the Aura status bar: an output path plus an "Open folder" button on
+success, or the ``QRKitError`` message (never a traceback) on failure.
+Generated and scanned images are previewed with Pillow's ``ImageTk``.
 
-Design goals:
-  * tkinter/ttk for the UI; Pillow only for image preview.  Dark mode is a
-    ttk-style + palette swap.
-  * Importing this module does nothing.  Only :func:`main` builds a root window,
-    and it degrades gracefully (prints a note, returns 0) with no display.
+Design goals baked in here (mirrors the QuickOpen house style):
+  * built on the vendored ``qrkit/aura.py`` design system, which layers the
+    quickopen.ai look (deep space + light) over CustomTkinter.  Runtime deps:
+    ``customtkinter`` (+ ``darkdetect``) -- declared in requirements.txt; the
+    PyInstaller build adds ``--collect-all customtkinter``.
+  * Importing this module does nothing.  Only :func:`main` builds a root
+    window, and it degrades gracefully (prints a note, returns 0) with no
+    display or with customtkinter missing.
   * Frozen-exe safe: bundled assets resolve via ``sys._MEIPASS`` / the exe dir
     when ``sys.frozen`` is set -- never ``__file__``.
 
@@ -27,13 +32,16 @@ import sys
 import tempfile
 import threading
 
-# tkinter/Pillow are imported lazily inside build_app()/main() so that merely
-# importing this module (packaging, headless CI) never fails.
+# tkinter/customtkinter/Pillow are imported lazily inside build_app()/main() so
+# that merely importing this module (packaging, headless CI) never fails.
 
 APP_NAME = "QR & Barcode Toolkit"
 APP_VERSION = "1.0.0"
 WINDOW_TITLE = "QR & Barcode Toolkit — by QuickOpen (quickopen.ai)"
 PROJECT_URL = "https://quickopen.ai"
+# UI-accent registry override (ui/aurakit/README.md §2): the app icon is
+# near-black, unusable as a UI accent, so the registry assigns violet.
+ACCENT = "#7c5cf0"
 
 IMAGE_TYPES = [
     ("Images", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.gif"),
@@ -42,20 +50,6 @@ IMAGE_TYPES = [
 PNG_TYPES = [("PNG image", "*.png"), ("All files", "*.*")]
 SVG_TYPES = [("SVG image", "*.svg"), ("All files", "*.*")]
 CSV_TYPES = [("CSV files", "*.csv"), ("All files", "*.*")]
-
-# (category, [(tool_id, label), ...]) -- tool_id maps to a _panel_<id> method.
-TOOL_TREE = [
-    ("Generate", [
-        ("qr", "QR code"),
-        ("barcode", "Barcode"),
-    ]),
-    ("Decode", [
-        ("scan", "Scan image"),
-    ]),
-    ("Batch", [
-        ("batch", "Batch from CSV"),
-    ]),
-]
 
 TOOL_DESCRIPTIONS = {
     "qr": "Pick a content preset, fill the fields, preview live, then save PNG/SVG.",
@@ -111,24 +105,6 @@ QR_FIELDS = {
 
 ERROR_LEVELS = [("Low (7%)", "l"), ("Medium (15%)", "m"),
                 ("Quartile (25%)", "q"), ("High (30%)", "h")]
-
-# ---- colour palettes (mirror the QuickOpen palette) -------------------------
-PALETTES = {
-    "light": {
-        "bg": "#f5f7fa", "surface": "#ffffff", "text": "#141820",
-        "muted": "#5b6472", "primary": "#2f5fe0", "primary_hi": "#2450c8",
-        "entry": "#ffffff", "border": "#d5dae2", "sel": "#2f5fe0",
-        "sel_fg": "#ffffff", "trough": "#e2e7ef", "ok": "#1f7a3d",
-        "err": "#c0392b", "canvas": "#ffffff",
-    },
-    "dark": {
-        "bg": "#0f1115", "surface": "#1a1e24", "text": "#f1f3f7",
-        "muted": "#9aa4b2", "primary": "#5b86f7", "primary_hi": "#7098ff",
-        "entry": "#1a1e24", "border": "#2a2f38", "sel": "#5b86f7",
-        "sel_fg": "#0f1115", "trough": "#2a2f38", "ok": "#5bd68a",
-        "err": "#ff6b5e", "canvas": "#222831",
-    },
-}
 
 
 # ---------------------------------------------------------------------------
@@ -186,16 +162,17 @@ def open_with_default_app(path):
 
 
 # ---------------------------------------------------------------------------
-# The app (built lazily; tkinter imported only inside build_app/main)
+# The app (built lazily; tkinter/customtkinter imported only inside build_app)
 # ---------------------------------------------------------------------------
 def build_app():
-    """Construct and return the App class bound to a live tkinter import."""
+    """Construct and return the App class bound to live GUI imports."""
     import tkinter as tk
     from tkinter import filedialog, ttk
+    import customtkinter as ctk
 
     from PIL import Image, ImageTk
 
-    from . import guiconfig
+    from . import aura, guiconfig
     from .barcode_gen import make_barcode, supported_kinds
     from .batch import batch_qr_from_csv
     from .errors import QRKitError
@@ -205,24 +182,25 @@ def build_app():
     )
     from .scan import scan_qr
 
-    FONT = "Segoe UI"
+    LABEL_W = 110       # px, the left field-label column
 
     # -- small reusable widgets ------------------------------------------
-    class FileRow(ttk.Frame):
+    class FileRow(ctk.CTkFrame):
         """A labelled path field + Browse button. ``mode`` picks the dialog."""
 
         def __init__(self, master, app, label, mode="open_image",
                      filetypes=None, on_change=None):
-            super().__init__(master, style="TFrame")
+            super().__init__(master, fg_color="transparent")
             self.app = app
             self.mode = mode
             self.filetypes = filetypes
             self.var = tk.StringVar()
-            ttk.Label(self, text=label, width=14, anchor="w").pack(side="left")
-            ent = ttk.Entry(self, textvariable=self.var)
-            ent.pack(side="left", fill="x", expand=True, padx=(0, 6))
-            ttk.Button(self, text="Browse…", command=self._browse,
-                       width=10).pack(side="left")
+            ctk.CTkLabel(self, text=label, width=LABEL_W, anchor="w",
+                         font=aura.font()).pack(side="left")
+            ent = aura.AuraEntry(self, textvariable=self.var)
+            ent.pack(side="left", fill="x", expand=True, padx=(0, 8))
+            aura.AuraButton(self, "Browse…", kind="secondary", width=92,
+                            command=self._browse).pack(side="left")
             if on_change:
                 self.var.trace_add("write", lambda *_: on_change(self.var.get()))
 
@@ -248,36 +226,45 @@ def build_app():
             self.var.set(value or "")
 
     # -- the main window --------------------------------------------------
-    class App(tk.Tk):
+    class App(aura.AuraApp):
         def __init__(self):
-            super().__init__()
-            self.title(WINDOW_TITLE)
-            self.geometry("1040x680")
-            self.minsize(880, 560)
+            super().__init__(
+                title=WINDOW_TITLE, app_name=APP_NAME, accent=ACCENT,
+                theme=guiconfig.get_theme(),
+                icon_png=asset_path("qr-toolkit.png"), version=APP_VERSION,
+                tagline="offline codes",
+                on_theme_change=guiconfig.set_theme,
+                size=(1100, 700), min_size=(900, 560))
 
-            self.theme = guiconfig.get_theme()
             self._busy = False
-            self._panels = {}
-            self._current = None
-            self._tracked = []      # (tk_widget, role) for manual re-theming
-            self._img_refs = {}     # panel_id -> PhotoImage (keep alive)
+            self._previews = {}       # panel_id -> PhotoImage (keep alive)
+            self._preview_labels = [] # raw tk preview labels, re-themed manually
             self._history = []
             self._last_output_dir = None
             self._tmpdir = tempfile.mkdtemp(prefix="qrtk_gui_")
             self._preview_files = {}  # panel_id -> last generated temp file
 
+            # "Open folder" lives in the Aura status bar's action area and is
+            # packed/unpacked exactly like the old result-bar button.
+            self.openfolder_btn = aura.AuraButton(
+                self.statusbar.actions, "Open folder", kind="secondary",
+                height=30, command=self._open_last_folder)
+
             self._set_icon()
             self._build_menu()
-            self._build_layout()
-            self._apply_theme()
+            self.add_section("qr", "QR code", "▦", self._panel_qr)
+            self.add_section("barcode", "Barcode", "▤", self._panel_barcode)
+            self.add_section("scan", "Scan image", "⚲", self._panel_scan)
+            self.add_section("batch", "Batch from CSV", "⛁", self._panel_batch)
+            self.add_section("about", "About", "ℹ", self._panel_about)
+            self.show("qr")
             self.protocol("WM_DELETE_WINDOW", self._on_close)
-            self.after(50, self._select_first_tool)
 
         # ---- assets / icon
         def _set_icon(self):
             try:
                 ico = asset_path("qr-toolkit.ico")
-                if ico:
+                if ico and os.name == "nt":
                     self.iconbitmap(ico)
                     return
             except Exception:
@@ -286,114 +273,41 @@ def build_app():
                 png = asset_path("qr-toolkit.png")
                 if png:
                     img = tk.PhotoImage(file=png)
-                    self._img_refs["_icon"] = img
+                    self._previews["_icon"] = img
                     self.iconphoto(True, img)
             except Exception:
                 pass  # icon is cosmetic; never block launch
 
-        # ---- theming
-        def track(self, widget, role):
-            self._tracked.append((widget, role))
+        # ---- navigation (Aura sections; keep the old tool-id entry points)
+        def _select_tool(self, tool_id):
+            self.show(tool_id)
 
-        def _pal(self):
-            return PALETTES[self.theme]
+        def show(self, sid):
+            super().show(sid)
+            # switching panels clears the previous result, like the old app
+            if hasattr(self, "openfolder_btn"):
+                self._clear_result()
 
-        def _apply_theme(self):
-            p = self._pal()
-            style = ttk.Style(self)
-            try:
-                style.theme_use("clam")
-            except Exception:
-                pass
-            self.configure(bg=p["bg"])
-            style.configure(".", background=p["bg"], foreground=p["text"],
-                            fieldbackground=p["entry"], bordercolor=p["border"],
-                            font=(FONT, 10))
-            style.configure("TFrame", background=p["bg"])
-            style.configure("Sidebar.TFrame", background=p["surface"])
-            style.configure("Card.TFrame", background=p["surface"])
-            style.configure("TLabel", background=p["bg"], foreground=p["text"])
-            style.configure("Muted.TLabel", background=p["bg"], foreground=p["muted"])
-            style.configure("Header.TLabel", background=p["bg"], foreground=p["text"],
-                            font=(FONT, 15, "bold"))
-            style.configure("Sub.TLabel", background=p["bg"], foreground=p["muted"],
-                            font=(FONT, 10))
-            style.configure("Brand.TLabel", background=p["surface"],
-                            foreground=p["text"], font=(FONT, 12, "bold"))
-            style.configure("Ok.TLabel", background=p["bg"], foreground=p["ok"])
-            style.configure("Err.TLabel", background=p["bg"], foreground=p["err"])
-            style.configure("Status.TLabel", background=p["surface"],
-                            foreground=p["muted"])
-            style.configure("Preview.TLabel", background=p["canvas"],
-                            foreground=p["muted"], anchor="center")
-            style.configure("TButton", background=p["surface"], foreground=p["text"],
-                            bordercolor=p["border"], focuscolor=p["surface"],
-                            padding=(10, 5))
-            style.map("TButton",
-                      background=[("active", p["trough"]), ("disabled", p["bg"])],
-                      foreground=[("disabled", p["muted"])])
-            style.configure("Accent.TButton", background=p["primary"],
-                            foreground="#ffffff", padding=(12, 6))
-            style.map("Accent.TButton",
-                      background=[("active", p["primary_hi"]),
-                                  ("disabled", p["border"])],
-                      foreground=[("disabled", p["muted"])])
-            style.configure("Toggle.TButton", background=p["surface"],
-                            foreground=p["text"], padding=(8, 4))
-            for name in ("TEntry", "TSpinbox"):
-                style.configure(name, fieldbackground=p["entry"], foreground=p["text"],
-                                insertcolor=p["text"], bordercolor=p["border"])
-            style.configure("TCombobox", fieldbackground=p["entry"],
-                            foreground=p["text"], background=p["surface"],
-                            arrowcolor=p["text"])
-            style.map("TCombobox",
-                      fieldbackground=[("readonly", p["entry"])],
-                      foreground=[("readonly", p["text"])])
-            style.configure("TCheckbutton", background=p["bg"], foreground=p["text"])
-            style.map("TCheckbutton", background=[("active", p["bg"])])
-            style.configure("TLabelframe", background=p["bg"], foreground=p["text"],
-                            bordercolor=p["border"])
-            style.configure("TLabelframe.Label", background=p["bg"],
-                            foreground=p["muted"])
-            style.configure("Sidebar.Treeview", background=p["surface"],
-                            fieldbackground=p["surface"], foreground=p["text"],
-                            bordercolor=p["border"], rowheight=26)
-            style.map("Sidebar.Treeview", background=[("selected", p["primary"])],
-                      foreground=[("selected", p["sel_fg"])])
-            style.configure("TScrollbar", background=p["surface"],
-                            troughcolor=p["bg"], bordercolor=p["border"],
-                            arrowcolor=p["text"])
-            style.configure("TSeparator", background=p["border"])
+        # ---- theme (Aura owns it; raw tk preview labels need a manual nudge)
+        def set_theme(self, theme):
+            super().set_theme(theme)
+            self._retheme_previews()
 
-            for widget, role in list(self._tracked):
+        def _retheme_previews(self):
+            for lbl in self._preview_labels:
                 try:
-                    if role == "listbox":
-                        widget.configure(bg=p["surface"], fg=p["text"],
-                                         selectbackground=p["primary"],
-                                         selectforeground=p["sel_fg"],
-                                         highlightthickness=1,
-                                         highlightbackground=p["border"], borderwidth=0)
-                    elif role == "text":
-                        widget.configure(bg=p["surface"], fg=p["text"],
-                                         insertbackground=p["text"],
-                                         selectbackground=p["primary"],
-                                         selectforeground=p["sel_fg"],
-                                         highlightthickness=1,
-                                         highlightbackground=p["border"], borderwidth=0)
-                    elif role == "preview":
-                        widget.configure(bg=p["canvas"], highlightthickness=1,
-                                         highlightbackground=p["border"])
+                    lbl.configure(fg=aura.P("muted"))
                 except Exception:
                     pass
 
-        def toggle_theme(self):
-            self.theme = "dark" if self.theme == "light" else "light"
-            guiconfig.set_theme(self.theme)
-            self._apply_theme()
-            self._theme_btn.configure(
-                text="☀ Light mode" if self.theme == "dark" else "🌙 Dark mode")
+        def _make_preview(self, parent, text, width=40, height=16):
+            lbl = tk.Label(parent, text=text, bd=0, width=width, height=height,
+                           bg=aura.P("surface"), fg=aura.P("muted"))
+            aura.track(lbl, "canvas")       # bg follows the theme
+            self._preview_labels.append(lbl)  # fg follows via _retheme_previews
+            return lbl
 
-        # ---- menu
+        # ---- menu (native menus stay)
         def _build_menu(self):
             bar = tk.Menu(self)
             filem = tk.Menu(bar, tearoff=0)
@@ -409,11 +323,14 @@ def build_app():
             bar.add_cascade(label="File", menu=filem)
 
             viewm = tk.Menu(bar, tearoff=0)
-            viewm.add_command(label="Toggle dark mode", command=self.toggle_theme)
+            viewm.add_command(
+                label="Toggle dark mode",
+                command=lambda: self.set_theme(
+                    "light" if self.theme == "dark" else "dark"))
             bar.add_cascade(label="View", menu=viewm)
 
             helpm = tk.Menu(bar, tearoff=0)
-            helpm.add_command(label="About", command=self._about)
+            helpm.add_command(label="About", command=lambda: self.show("about"))
             helpm.add_command(label="Open project page (quickopen.ai)",
                               command=lambda: open_with_default_app(PROJECT_URL))
             bar.add_cascade(label="Help", menu=helpm)
@@ -440,118 +357,18 @@ def build_app():
             self._fill_recent_menu()
 
         def _open_scan(self):
-            self._select_tool("scan")
+            self.show("scan")
             p = filedialog.askopenfilename(title="Open image", filetypes=IMAGE_TYPES)
-            if p and self._panels.get("scan") is not None:
+            if p:
                 self.load_path_scan(p)
 
-        # ---- layout
-        def _build_layout(self):
-            top = ttk.Frame(self, style="Sidebar.TFrame", padding=(12, 8))
-            top.pack(fill="x", side="top")
-            ttk.Label(top, text="QR & Barcode Toolkit",
-                      style="Brand.TLabel").pack(side="left")
-            ttk.Label(top, style="Status.TLabel",
-                      text="  offline · open source · by QuickOpen").pack(side="left")
-            self._theme_btn = ttk.Button(
-                top, style="Toggle.TButton", command=self.toggle_theme,
-                text="☀ Light mode" if self.theme == "dark" else "🌙 Dark mode")
-            self._theme_btn.pack(side="right")
-
-            body = ttk.Frame(self, style="TFrame")
-            body.pack(fill="both", expand=True)
-
-            side = ttk.Frame(body, style="Sidebar.TFrame", width=210)
-            side.pack(side="left", fill="y")
-            side.pack_propagate(False)
-            self.nav = ttk.Treeview(side, show="tree", selectmode="browse",
-                                    style="Sidebar.Treeview")
-            self.nav.pack(fill="both", expand=True, padx=6, pady=6)
-            self._nav_ids = {}
-            for cat, tools in TOOL_TREE:
-                cid = self.nav.insert("", "end", text=cat, open=True, tags=("cat",))
-                for tid, label in tools:
-                    iid = self.nav.insert(cid, "end", text="   " + label)
-                    self._nav_ids[iid] = tid
-            self.nav.tag_configure("cat", font=(FONT, 10, "bold"))
-            self.nav.bind("<<TreeviewSelect>>", self._on_nav_select)
-
-            main = ttk.Frame(body, style="TFrame", padding=(16, 12))
-            main.pack(side="left", fill="both", expand=True)
-            head = ttk.Frame(main, style="TFrame")
-            head.pack(fill="x")
-            self.title_lbl = ttk.Label(head, text="Welcome", style="Header.TLabel")
-            self.title_lbl.pack(anchor="w")
-            self.desc_lbl = ttk.Label(head, text="", style="Sub.TLabel",
-                                      wraplength=720, justify="left")
-            self.desc_lbl.pack(anchor="w", pady=(2, 8))
-            ttk.Separator(main).pack(fill="x")
-            self.container = ttk.Frame(main, style="TFrame")
-            self.container.pack(fill="both", expand=True, pady=(10, 8))
-
-            bar = ttk.Frame(self, style="Sidebar.TFrame", padding=(12, 6))
-            bar.pack(fill="x", side="bottom")
-            self.status_lbl = ttk.Label(bar, text="Ready", style="Status.TLabel",
-                                        width=14, anchor="w")
-            self.status_lbl.pack(side="left")
-            self.openfolder_btn = ttk.Button(bar, text="Open folder",
-                                             command=self._open_last_folder)
-            self.result_lbl = ttk.Label(bar, text="", style="Status.TLabel",
-                                        anchor="w", wraplength=700, justify="left")
-            self.result_lbl.pack(side="left", fill="x", expand=True, padx=8)
-
-        def _select_first_tool(self):
-            for iid in self._nav_ids:
-                self.nav.selection_set(iid)
-                self.nav.see(iid)
-                break
-
-        def _select_tool(self, tool_id):
-            for iid, tid in self._nav_ids.items():
-                if tid == tool_id:
-                    self.nav.selection_set(iid)
-                    self.nav.see(iid)
-                    return
-
-        def _on_nav_select(self, _e=None):
-            sel = self.nav.selection()
-            if not sel:
-                return
-            tid = self._nav_ids.get(sel[0])
-            if tid:
-                self._show_tool(tid)
-
-        def _show_tool(self, tool_id):
-            if self._current is not None:
-                self._current.pack_forget()
-            panel = self._panels.get(tool_id)
-            if panel is None:
-                panel = ttk.Frame(self.container, style="TFrame")
-                builder = getattr(self, "_panel_" + tool_id, None)
-                if builder:
-                    builder(panel)
-                else:
-                    ttk.Label(panel, text="Not implemented.").pack()
-                self._panels[tool_id] = panel
-                self._apply_theme()
-            panel.pack(fill="both", expand=True)
-            self._current = panel
-            title, desc = self._tool_meta(tool_id)
-            self.title_lbl.configure(text=title)
-            self.desc_lbl.configure(text=desc)
-            self._clear_result()
-
-        def _tool_meta(self, tool_id):
-            for _cat, tools in TOOL_TREE:
-                for tid, label in tools:
-                    if tid == tool_id:
-                        return label, TOOL_DESCRIPTIONS.get(tid, "")
-            return tool_id, ""
-
         # ---- background operation runner
+        # The worker thread must never touch tkinter (self.after from a
+        # non-main thread raises "main thread is not in main loop" and would
+        # leave _busy stuck forever).  It only fills a queue; the main thread
+        # polls it with self.after.
         def _bg(self, work, on_ok, button=None, busy="Working…"):
             if self._busy:
-                self._set_status("busy")
                 self._show_error("Please wait — an operation is already running.")
                 return
             self._busy = True
@@ -560,13 +377,9 @@ def build_app():
                     button.state(["disabled"])
                 except Exception:
                     pass
-            self._set_status(busy, kind="working")
             self._clear_result(keep_status=True)
+            self.set_status(busy, kind="working")
 
-            # The worker thread must never touch tkinter (self.after from a
-            # non-main thread raises "main thread is not in main loop" and
-            # would leave _busy stuck forever).  It only fills a queue; the
-            # main thread polls it with self.after.
             import queue
             outcome = queue.Queue(maxsize=1)
 
@@ -587,10 +400,9 @@ def build_app():
                     except Exception:
                         pass
                 if err is not None:
-                    self._set_status("error", kind="err")
                     self._show_error(err)
                     return
-                self._set_status("done", kind="ok")
+                self.set_status("Done", kind="ok")
                 try:
                     on_ok(res)
                 except Exception as ex:
@@ -607,21 +419,14 @@ def build_app():
             threading.Thread(target=run, daemon=True).start()
             self.after(50, poll)
 
-        # ---- result bar helpers
-        def _set_status(self, text, kind="idle"):
-            p = self._pal()
-            color = {"working": p["primary"], "ok": p["ok"], "err": p["err"]}.get(
-                kind, p["muted"])
-            self.status_lbl.configure(text=text, foreground=color)
-
+        # ---- status-bar helpers (errors go inline, never in a popup)
         def _clear_result(self, keep_status=False):
-            self.result_lbl.configure(text="")
             self.openfolder_btn.pack_forget()
             if not keep_status:
-                self._set_status("Ready")
+                self.set_status("Ready")
 
         def _show_error(self, message):
-            self.result_lbl.configure(text="✕ " + message, foreground=self._pal()["err"])
+            self.set_error(message)
             self.openfolder_btn.pack_forget()
 
         def report_success(self, message, outputs=None):
@@ -635,29 +440,27 @@ def build_app():
                 first = outputs[0]
                 self._last_output_dir = (first if os.path.isdir(first)
                                          else os.path.dirname(os.path.abspath(first)))
-                self.openfolder_btn.pack(side="right")
-            self.result_lbl.configure(text="✓ " + message, foreground=self._pal()["ok"])
-            self._set_status("done", kind="ok")
+                self.openfolder_btn.pack(side="left")
+            self.set_success(message)
 
         def _open_last_folder(self):
             if self._last_output_dir:
                 open_in_file_manager(self._last_output_dir)
 
         def _show_history(self):
-            win = tk.Toplevel(self)
+            win = ctk.CTkToplevel(self)
             win.title("Session output history")
-            win.geometry("640x360")
-            win.configure(bg=self._pal()["bg"])
-            ttk.Label(win, style="Sub.TLabel", padding=10,
-                      text="Files produced in this session:").pack(anchor="w")
-            frame = ttk.Frame(win, style="TFrame")
-            frame.pack(fill="both", expand=True, padx=10)
+            win.geometry("640x380")
+            aura.Caption(win, "Files produced in this session:").pack(
+                anchor="w", padx=16, pady=(14, 6))
+            frame = ctk.CTkFrame(win, fg_color="transparent")
+            frame.pack(fill="both", expand=True, padx=16)
             lb = tk.Listbox(frame, activestyle="none")
             sb = ttk.Scrollbar(frame, orient="vertical", command=lb.yview)
             lb.configure(yscrollcommand=sb.set)
             sb.pack(side="right", fill="y")
             lb.pack(side="left", fill="both", expand=True)
-            self.track(lb, "listbox")
+            aura.track(lb, "listbox")
             for o in self._history:
                 lb.insert("end", o)
             if not self._history:
@@ -671,38 +474,15 @@ def build_app():
                 if os.path.exists(path):
                     (open_in_file_manager if reveal else open_with_default_app)(path)
 
-            btns = ttk.Frame(win, style="TFrame", padding=10)
-            btns.pack(fill="x")
-            ttk.Button(btns, text="Open", command=lambda: _open_sel(False)).pack(side="left")
-            ttk.Button(btns, text="Open folder",
-                       command=lambda: _open_sel(True)).pack(side="left", padx=6)
-            ttk.Button(btns, text="Close", command=win.destroy).pack(side="right")
-            self._apply_theme()
-
-        def _about(self):
-            win = tk.Toplevel(self)
-            win.title("About QR & Barcode Toolkit")
-            win.configure(bg=self._pal()["bg"])
-            win.resizable(False, False)
-            frm = ttk.Frame(win, style="TFrame", padding=18)
-            frm.pack(fill="both", expand=True)
-            ttk.Label(frm, text="QR & Barcode Toolkit",
-                      style="Header.TLabel").pack(anchor="w")
-            ttk.Label(frm, text=f"Version {APP_VERSION}",
-                      style="Sub.TLabel").pack(anchor="w", pady=(0, 8))
-            ttk.Label(frm, style="TLabel", justify="left", wraplength=380,
-                      text="Generate QR codes (URL, Wi-Fi, vCard, email, SMS, geo, "
-                           "text) and 1D barcodes, scan QR codes from images, and "
-                           "batch-generate from a CSV.\n\n100% AI-built, open source, "
-                           "published on QuickOpen. Fully offline.").pack(anchor="w")
-            ttk.Label(frm, style="Sub.TLabel", justify="left", wraplength=380,
-                      text="Licensed under Apache-2.0. Built on: segno, "
-                           "python-barcode, OpenCV, Pillow.").pack(anchor="w", pady=(8, 4))
-            link = ttk.Label(frm, text="Project page: quickopen.ai",
-                             style="Ok.TLabel", cursor="hand2")
-            link.pack(anchor="w", pady=(4, 10))
-            link.bind("<Button-1>", lambda e: open_with_default_app(PROJECT_URL))
-            ttk.Button(frm, text="Close", command=win.destroy).pack(anchor="e")
+            btns = ctk.CTkFrame(win, fg_color="transparent")
+            btns.pack(fill="x", padx=16, pady=12)
+            aura.AuraButton(btns, "Open", kind="secondary",
+                            command=lambda: _open_sel(False)).pack(side="left")
+            aura.AuraButton(btns, "Open folder", kind="secondary",
+                            command=lambda: _open_sel(True)).pack(
+                side="left", padx=(8, 0))
+            aura.AuraButton(btns, "Close", kind="ghost",
+                            command=win.destroy).pack(side="right")
             win.transient(self)
             try:
                 win.grab_set()  # can raise "grab failed: window not viewable"
@@ -716,8 +496,9 @@ def build_app():
                 im = im.convert("RGBA") if im.mode == "P" else im
                 im.thumbnail((max_side, max_side), Image.LANCZOS)
                 photo = ImageTk.PhotoImage(im)
-                self._img_refs[panel_id] = photo  # keep alive
-                label.configure(image=photo, text="")
+                self._previews[panel_id] = photo  # keep alive
+                label.configure(image=photo, text="", width=photo.width(),
+                                height=photo.height())
             except Exception as exc:
                 label.configure(image="", text=f"(could not preview: {exc})")
 
@@ -748,77 +529,91 @@ def build_app():
                 self._show_error(f"Could not copy: {exc}")
 
         # =====================================================================
-        # PANELS
+        # PANELS (Aura section builders; run lazily on first show)
         # =====================================================================
         def _suggest_out(self, stem, ext):
             return os.path.join(self._tmpdir, f"{stem}{ext}")
 
+        @staticmethod
+        def _labelled_row(parent, label, pady=3):
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(fill="x", pady=pady)
+            ctk.CTkLabel(row, text=label, width=LABEL_W, anchor="w",
+                         font=aura.font()).pack(side="left")
+            return row
+
         # ---------- Generate QR ----------
         def _panel_qr(self, parent):
-            left = ttk.Frame(parent, style="TFrame")
+            aura.Caption(parent, TOOL_DESCRIPTIONS["qr"]).pack(
+                anchor="w", pady=(0, 12))
+            cols = ctk.CTkFrame(parent, fg_color="transparent")
+            cols.pack(fill="both", expand=True)
+            right = ctk.CTkFrame(cols, fg_color="transparent")
+            right.pack(side="right", fill="y", padx=(16, 0))
+            left = ctk.CTkFrame(cols, fg_color="transparent")
             left.pack(side="left", fill="both", expand=True)
-            right = ttk.Frame(parent, style="TFrame")
-            right.pack(side="right", fill="y", padx=(14, 0))
 
-            # preset chooser
-            row = ttk.Frame(left, style="TFrame")
-            row.pack(fill="x", pady=(0, 6))
-            ttk.Label(row, text="Content", width=14, anchor="w").pack(side="left")
+            # content preset + dynamic fields
+            content = aura.Card(left, title="Content")
+            content.pack(fill="x")
+            row = self._labelled_row(content.body, "Preset", pady=(0, 6))
             self._qr_preset_var = tk.StringVar(value=QR_PRESETS[0][0])
-            preset_cb = ttk.Combobox(row, state="readonly", width=16,
-                                     textvariable=self._qr_preset_var,
-                                     values=[lbl for lbl, _ in QR_PRESETS])
-            preset_cb.pack(side="left")
-            preset_cb.bind("<<ComboboxSelected>>", lambda e: self._qr_rebuild_fields())
-
-            # dynamic fields
-            self._qr_fields_frame = ttk.Frame(left, style="TFrame")
-            self._qr_fields_frame.pack(fill="x", pady=4)
+            aura.AuraCombo(row, variable=self._qr_preset_var,
+                           values=[lbl for lbl, _ in QR_PRESETS],
+                           state="readonly", width=180,
+                           command=lambda _v: self._qr_rebuild_fields()).pack(side="left")
+            self._qr_fields_frame = ctk.CTkFrame(content.body,
+                                                 fg_color="transparent")
+            self._qr_fields_frame.pack(fill="x", pady=(4, 0))
             self._qr_field_vars = {}
             self._qr_field_widgets = {}
 
             # options: scale / border / error
-            opts = ttk.Labelframe(left, text="Options", style="TLabelframe",
-                                  padding=(10, 6))
-            opts.pack(fill="x", pady=(8, 6))
-            r1 = ttk.Frame(opts, style="TFrame")
+            opts = aura.Card(left, title="Options")
+            opts.pack(fill="x", pady=(14, 0))
+            r1 = ctk.CTkFrame(opts.body, fg_color="transparent")
             r1.pack(fill="x", pady=2)
-            ttk.Label(r1, text="Scale", width=8).pack(side="left")
+            ctk.CTkLabel(r1, text="Scale", width=60, anchor="w",
+                         font=aura.font()).pack(side="left")
             self._qr_scale = tk.IntVar(value=8)
             ttk.Spinbox(r1, from_=1, to=40, width=5,
                         textvariable=self._qr_scale).pack(side="left")
-            ttk.Label(r1, text="Border", width=8).pack(side="left", padx=(12, 0))
+            ctk.CTkLabel(r1, text="Border", width=60, anchor="w",
+                         font=aura.font()).pack(side="left", padx=(16, 0))
             self._qr_border = tk.IntVar(value=4)
             ttk.Spinbox(r1, from_=0, to=20, width=5,
                         textvariable=self._qr_border).pack(side="left")
-            r2 = ttk.Frame(opts, style="TFrame")
-            r2.pack(fill="x", pady=2)
-            ttk.Label(r2, text="Error", width=8).pack(side="left")
+            r2 = ctk.CTkFrame(opts.body, fg_color="transparent")
+            r2.pack(fill="x", pady=(8, 0))
+            ctk.CTkLabel(r2, text="Error", width=60, anchor="w",
+                         font=aura.font()).pack(side="left")
             self._qr_error_var = tk.StringVar(value=ERROR_LEVELS[1][0])
-            ttk.Combobox(r2, state="readonly", width=16,
-                         textvariable=self._qr_error_var,
-                         values=[lbl for lbl, _ in ERROR_LEVELS]).pack(side="left")
+            aura.AuraCombo(r2, variable=self._qr_error_var, state="readonly",
+                           width=180,
+                           values=[lbl for lbl, _ in ERROR_LEVELS]).pack(side="left")
 
             # action buttons
-            btns = ttk.Frame(left, style="TFrame")
-            btns.pack(fill="x", pady=(8, 0))
-            self._qr_preview_btn = ttk.Button(btns, text="Preview",
-                                              style="Accent.TButton",
-                                              command=self._qr_preview)
+            btns = ctk.CTkFrame(left, fg_color="transparent")
+            btns.pack(fill="x", pady=(14, 0))
+            self._qr_preview_btn = aura.AuraButton(btns, "Preview",
+                                                   command=self._qr_preview)
             self._qr_preview_btn.pack(side="left")
-            ttk.Button(btns, text="Save PNG…",
-                       command=lambda: self._qr_save("png")).pack(side="left", padx=6)
-            ttk.Button(btns, text="Save SVG…",
-                       command=lambda: self._qr_save("svg")).pack(side="left")
-            ttk.Button(btns, text="Copy image",
-                       command=self._qr_copy).pack(side="left", padx=6)
+            aura.AuraButton(btns, "Save PNG…", kind="secondary",
+                            command=lambda: self._qr_save("png")).pack(
+                side="left", padx=(8, 0))
+            aura.AuraButton(btns, "Save SVG…", kind="secondary",
+                            command=lambda: self._qr_save("svg")).pack(
+                side="left", padx=(8, 0))
+            aura.AuraButton(btns, "Copy image", kind="ghost",
+                            command=self._qr_copy).pack(side="left", padx=(8, 0))
 
-            # preview label on the right
-            ttk.Label(right, text="Preview", style="Sub.TLabel").pack(anchor="w")
-            self._qr_preview_lbl = tk.Label(right, width=44, height=20,
-                                            text="(no preview yet)")
-            self._qr_preview_lbl.pack(pady=6)
-            self.track(self._qr_preview_lbl, "preview")
+            # preview card on the right
+            pv = aura.Card(right, title="Preview")
+            pv.pack(fill="x")
+            self._qr_preview_lbl = self._make_preview(pv.body,
+                                                      "(no preview yet)",
+                                                      width=40, height=18)
+            self._qr_preview_lbl.pack(pady=4)
 
             self._qr_rebuild_fields()
 
@@ -836,35 +631,33 @@ def build_app():
             self._qr_field_widgets = {}
             key = self._qr_current_preset_key()
             for fkey, flabel, kind in QR_FIELDS.get(key, []):
-                row = ttk.Frame(self._qr_fields_frame, style="TFrame")
-                row.pack(fill="x", pady=2)
-                ttk.Label(row, text=flabel, width=14, anchor="w").pack(side="left")
+                row = self._labelled_row(self._qr_fields_frame, flabel)
                 if kind == "check":
                     var = tk.BooleanVar(value=False)
-                    ttk.Checkbutton(row, variable=var).pack(side="left")
+                    ctk.CTkCheckBox(row, text="", width=24, variable=var,
+                                    font=aura.font()).pack(side="left")
                     self._qr_field_vars[fkey] = var
                 elif kind.startswith("combo:"):
                     values = kind.split(":", 1)[1].split(",")
                     var = tk.StringVar(value=values[0])
-                    ttk.Combobox(row, state="readonly", width=16, values=values,
-                                 textvariable=var).pack(side="left")
+                    aura.AuraCombo(row, variable=var, values=values,
+                                   state="readonly", width=180).pack(side="left")
                     self._qr_field_vars[fkey] = var
                 elif kind == "text":
-                    txt = tk.Text(row, height=3, width=34, wrap="word")
+                    txt = tk.Text(row, height=3, width=20, wrap="word")
                     txt.pack(side="left", fill="x", expand=True)
-                    self.track(txt, "text")
+                    aura.track(txt, "text")
                     self._qr_field_widgets[fkey] = txt
                 elif kind == "password":
                     var = tk.StringVar()
-                    ttk.Entry(row, textvariable=var, show="•").pack(
+                    aura.AuraEntry(row, textvariable=var, show="•").pack(
                         side="left", fill="x", expand=True)
                     self._qr_field_vars[fkey] = var
                 else:
                     var = tk.StringVar()
-                    ttk.Entry(row, textvariable=var).pack(
+                    aura.AuraEntry(row, textvariable=var).pack(
                         side="left", fill="x", expand=True)
                     self._qr_field_vars[fkey] = var
-            self._apply_theme()
 
         def _qr_read_fields(self):
             data = {}
@@ -966,46 +759,47 @@ def build_app():
 
         # ---------- Barcode ----------
         def _panel_barcode(self, parent):
-            left = ttk.Frame(parent, style="TFrame")
+            aura.Caption(parent, TOOL_DESCRIPTIONS["barcode"]).pack(
+                anchor="w", pady=(0, 12))
+            cols = ctk.CTkFrame(parent, fg_color="transparent")
+            cols.pack(fill="both", expand=True)
+            right = ctk.CTkFrame(cols, fg_color="transparent")
+            right.pack(side="right", fill="y", padx=(16, 0))
+            left = ctk.CTkFrame(cols, fg_color="transparent")
             left.pack(side="left", fill="both", expand=True)
-            right = ttk.Frame(parent, style="TFrame")
-            right.pack(side="right", fill="y", padx=(14, 0))
 
-            row = ttk.Frame(left, style="TFrame")
-            row.pack(fill="x", pady=(0, 6))
-            ttk.Label(row, text="Kind", width=14, anchor="w").pack(side="left")
+            card = aura.Card(left, title="Barcode")
+            card.pack(fill="x")
+            row = self._labelled_row(card.body, "Kind", pady=(0, 6))
             self._bc_kind = tk.StringVar(value=supported_kinds()[0])
-            ttk.Combobox(row, state="readonly", width=16, textvariable=self._bc_kind,
-                         values=supported_kinds()).pack(side="left")
-
-            row2 = ttk.Frame(left, style="TFrame")
-            row2.pack(fill="x", pady=4)
-            ttk.Label(row2, text="Data", width=14, anchor="w").pack(side="left")
+            aura.AuraCombo(row, variable=self._bc_kind, state="readonly",
+                           width=180, values=supported_kinds()).pack(side="left")
+            row2 = self._labelled_row(card.body, "Data")
             self._bc_data = tk.StringVar()
-            ttk.Entry(row2, textvariable=self._bc_data).pack(
+            aura.AuraEntry(row2, textvariable=self._bc_data).pack(
                 side="left", fill="x", expand=True)
+            aura.Caption(card.body,
+                         "EAN13 needs 12–13 digits, EAN8 7–8, UPCA 11–12 "
+                         "(check digit auto-added). Code128/Code39 accept "
+                         "text.", wraplength=440, justify="left").pack(
+                anchor="w", pady=(6, 0))
 
-            ttk.Label(left, style="Muted.TLabel", wraplength=420, justify="left",
-                      text="EAN13 needs 12–13 digits, EAN8 7–8, UPCA 11–12 "
-                           "(check digit auto-added). Code128/Code39 accept text.").pack(
-                anchor="w", pady=(2, 8))
-
-            btns = ttk.Frame(left, style="TFrame")
-            btns.pack(fill="x", pady=(4, 0))
-            self._bc_preview_btn = ttk.Button(btns, text="Preview",
-                                              style="Accent.TButton",
-                                              command=self._bc_preview)
+            btns = ctk.CTkFrame(left, fg_color="transparent")
+            btns.pack(fill="x", pady=(14, 0))
+            self._bc_preview_btn = aura.AuraButton(btns, "Preview",
+                                                   command=self._bc_preview)
             self._bc_preview_btn.pack(side="left")
-            ttk.Button(btns, text="Save PNG…",
-                       command=self._bc_save).pack(side="left", padx=6)
-            ttk.Button(btns, text="Copy image",
-                       command=self._bc_copy).pack(side="left")
+            aura.AuraButton(btns, "Save PNG…", kind="secondary",
+                            command=self._bc_save).pack(side="left", padx=(8, 0))
+            aura.AuraButton(btns, "Copy image", kind="ghost",
+                            command=self._bc_copy).pack(side="left", padx=(8, 0))
 
-            ttk.Label(right, text="Preview", style="Sub.TLabel").pack(anchor="w")
-            self._bc_preview_lbl = tk.Label(right, width=44, height=16,
-                                            text="(no preview yet)")
-            self._bc_preview_lbl.pack(pady=6)
-            self.track(self._bc_preview_lbl, "preview")
+            pv = aura.Card(right, title="Preview")
+            pv.pack(fill="x")
+            self._bc_preview_lbl = self._make_preview(pv.body,
+                                                      "(no preview yet)",
+                                                      width=40, height=14)
+            self._bc_preview_lbl.pack(pady=4)
 
         def _bc_preview(self):
             data = self._bc_data.get().strip()
@@ -1055,34 +849,38 @@ def build_app():
 
         # ---------- Scan ----------
         def _panel_scan(self, parent):
-            top = ttk.Frame(parent, style="TFrame")
-            top.pack(fill="x")
-            self._scan_row = FileRow(top, self, "Image", mode="open_image",
+            aura.Caption(parent, TOOL_DESCRIPTIONS["scan"]).pack(
+                anchor="w", pady=(0, 12))
+            self._scan_row = FileRow(parent, self, "Image", mode="open_image",
                                      filetypes=IMAGE_TYPES)
             self._scan_row.pack(fill="x")
-            self._scan_btn = ttk.Button(parent, text="Scan for QR codes",
-                                        style="Accent.TButton", command=self._do_scan)
-            self._scan_btn.pack(anchor="w", pady=8)
+            self._scan_btn = aura.AuraButton(parent, "Scan for QR codes",
+                                             command=self._do_scan)
+            self._scan_btn.pack(anchor="w", pady=(12, 12))
 
-            split = ttk.Frame(parent, style="TFrame")
+            split = ctk.CTkFrame(parent, fg_color="transparent")
             split.pack(fill="both", expand=True)
-            left = ttk.Frame(split, style="TFrame")
+            right = ctk.CTkFrame(split, fg_color="transparent")
+            right.pack(side="right", fill="y", padx=(16, 0))
+            left = ctk.CTkFrame(split, fg_color="transparent")
             left.pack(side="left", fill="both", expand=True)
-            right = ttk.Frame(split, style="TFrame")
-            right.pack(side="right", fill="y", padx=(14, 0))
 
-            ttk.Label(left, text="Decoded results", style="Sub.TLabel").pack(anchor="w")
-            self._scan_out = tk.Text(left, height=12, wrap="word")
-            self._scan_out.pack(fill="both", expand=True, pady=6)
-            self.track(self._scan_out, "text")
-            ttk.Button(left, text="Copy results",
-                       command=self._scan_copy).pack(anchor="w")
+            results = aura.Card(left, title="Decoded results")
+            results.pack(fill="both", expand=True)
+            self._scan_out = tk.Text(results.body, height=12, width=20,
+                                     wrap="word")
+            self._scan_out.pack(fill="both", expand=True)
+            aura.track(self._scan_out, "text")
+            aura.AuraButton(results.body, "Copy results", kind="secondary",
+                            command=self._scan_copy).pack(
+                anchor="w", pady=(10, 0))
 
-            ttk.Label(right, text="Image", style="Sub.TLabel").pack(anchor="w")
-            self._scan_preview_lbl = tk.Label(right, width=36, height=16,
-                                              text="(open an image)")
-            self._scan_preview_lbl.pack(pady=6)
-            self.track(self._scan_preview_lbl, "preview")
+            pv = aura.Card(right, title="Image")
+            pv.pack(fill="x")
+            self._scan_preview_lbl = self._make_preview(pv.body,
+                                                        "(open an image)",
+                                                        width=34, height=14)
+            self._scan_preview_lbl.pack(pady=4)
 
         def load_path_scan(self, path):
             self._scan_row.set(path)
@@ -1127,53 +925,51 @@ def build_app():
 
         # ---------- Batch ----------
         def _panel_batch(self, parent):
-            self._batch_csv = FileRow(parent, self, "CSV file", mode="open_image",
-                                      filetypes=CSV_TYPES)
-            self._batch_csv.pack(fill="x", pady=2)
+            aura.Caption(parent, TOOL_DESCRIPTIONS["batch"]).pack(
+                anchor="w", pady=(0, 12))
 
-            row = ttk.Frame(parent, style="TFrame")
-            row.pack(fill="x", pady=2)
-            ttk.Label(row, text="Data column", width=14, anchor="w").pack(side="left")
+            src = aura.Card(parent, title="Input")
+            src.pack(fill="x")
+            self._batch_csv = FileRow(src.body, self, "CSV file",
+                                      mode="open_image", filetypes=CSV_TYPES)
+            self._batch_csv.pack(fill="x", pady=(0, 6))
+            row = self._labelled_row(src.body, "Data column")
             self._batch_col = tk.StringVar()
-            ttk.Entry(row, textvariable=self._batch_col).pack(
+            aura.AuraEntry(row, textvariable=self._batch_col).pack(
                 side="left", fill="x", expand=True)
-
-            row2 = ttk.Frame(parent, style="TFrame")
-            row2.pack(fill="x", pady=2)
-            ttk.Label(row2, text="Name column", width=14,
-                      anchor="w").pack(side="left")
+            row2 = self._labelled_row(src.body, "Name column")
             self._batch_name_col = tk.StringVar()
-            ttk.Entry(row2, textvariable=self._batch_name_col).pack(
+            aura.AuraEntry(row2, textvariable=self._batch_name_col).pack(
                 side="left", fill="x", expand=True)
-            ttk.Label(parent, style="Muted.TLabel",
-                      text="Name column is optional — leave blank to name files "
-                           "row1, row2, …").pack(anchor="w", pady=(0, 6))
+            aura.Caption(src.body,
+                         "Name column is optional — leave blank to name files "
+                         "row1, row2, …").pack(anchor="w", pady=(6, 0))
 
-            self._batch_out = FileRow(parent, self, "Output folder", mode="dir")
-            self._batch_out.pack(fill="x", pady=2)
-
-            opts = ttk.Labelframe(parent, text="QR options", style="TLabelframe",
-                                  padding=(10, 6))
-            opts.pack(fill="x", pady=(8, 6))
-            r1 = ttk.Frame(opts, style="TFrame")
+            out = aura.Card(parent, title="Output")
+            out.pack(fill="x", pady=(14, 0))
+            self._batch_out = FileRow(out.body, self, "Output folder", mode="dir")
+            self._batch_out.pack(fill="x", pady=(0, 8))
+            r1 = ctk.CTkFrame(out.body, fg_color="transparent")
             r1.pack(fill="x", pady=2)
-            ttk.Label(r1, text="Scale", width=8).pack(side="left")
+            ctk.CTkLabel(r1, text="Scale", width=60, anchor="w",
+                         font=aura.font()).pack(side="left")
             self._batch_scale = tk.IntVar(value=8)
             ttk.Spinbox(r1, from_=1, to=40, width=5,
                         textvariable=self._batch_scale).pack(side="left")
-            ttk.Label(r1, text="Border", width=8).pack(side="left", padx=(12, 0))
+            ctk.CTkLabel(r1, text="Border", width=60, anchor="w",
+                         font=aura.font()).pack(side="left", padx=(16, 0))
             self._batch_border = tk.IntVar(value=4)
             ttk.Spinbox(r1, from_=0, to=20, width=5,
                         textvariable=self._batch_border).pack(side="left")
-            ttk.Label(r1, text="Format", width=8).pack(side="left", padx=(12, 0))
+            ctk.CTkLabel(r1, text="Format", width=60, anchor="w",
+                         font=aura.font()).pack(side="left", padx=(16, 0))
             self._batch_fmt = tk.StringVar(value="png")
-            ttk.Combobox(r1, state="readonly", width=6, values=["png", "svg"],
-                         textvariable=self._batch_fmt).pack(side="left")
+            aura.AuraCombo(r1, variable=self._batch_fmt, state="readonly",
+                           width=90, values=["png", "svg"]).pack(side="left")
 
-            self._batch_btn = ttk.Button(parent, text="Generate all",
-                                         style="Accent.TButton",
-                                         command=self._do_batch)
-            self._batch_btn.pack(anchor="w", pady=8)
+            self._batch_btn = aura.AuraButton(parent, "Generate all",
+                                              command=self._do_batch)
+            self._batch_btn.pack(anchor="w", pady=(14, 0))
 
         def _do_batch(self):
             csv_path = self._batch_csv.get()
@@ -1207,6 +1003,30 @@ def build_app():
 
             self._bg(work, ok, button=self._batch_btn, busy="Generating…")
 
+        # ---------- About ----------
+        def _panel_about(self, parent):
+            card = aura.Card(parent, title="About QR & Barcode Toolkit")
+            card.pack(fill="x")
+            aura.Heading(card.body, APP_NAME).pack(anchor="w")
+            aura.Caption(card.body, f"Version {APP_VERSION}").pack(
+                anchor="w", pady=(0, 10))
+            ctk.CTkLabel(
+                card.body, font=aura.font(), justify="left", anchor="w",
+                wraplength=520,
+                text="Generate QR codes (URL, Wi-Fi, vCard, email, SMS, geo, "
+                     "text) and 1D barcodes, scan QR codes from images, and "
+                     "batch-generate from a CSV.\n\n100% AI-built, open "
+                     "source, published on QuickOpen. Fully offline.").pack(
+                anchor="w")
+            aura.Caption(card.body,
+                         "Licensed under Apache-2.0. Built on: segno, "
+                         "python-barcode, OpenCV, Pillow, CustomTkinter "
+                         "(all MIT/BSD).").pack(anchor="w", pady=(10, 4))
+            aura.AuraButton(card.body, "Project page: quickopen.ai",
+                            kind="ghost",
+                            command=lambda: open_with_default_app(
+                                PROJECT_URL)).pack(anchor="w", pady=(6, 0))
+
         # ---- close
         def _on_close(self):
             try:
@@ -1220,7 +1040,12 @@ def build_app():
 
 
 def main():
-    """Entry point: build the root window and run. Degrades on headless hosts."""
+    """Entry point: build the root window and run. Degrades on headless hosts.
+
+    Importing this module does nothing; only this function creates a Tk root.
+    With no display (e.g. a server), without Pillow, or without customtkinter
+    installed, it prints a friendly note and returns 0 instead of raising.
+    """
     try:
         import tkinter as tk
     except Exception as exc:
@@ -1237,6 +1062,10 @@ def main():
     try:
         App = build_app()
         app = App()
+    except ImportError as exc:
+        print(f"{APP_NAME}: the GUI needs the 'customtkinter' package "
+              f"({exc}). Install it with:  pip install customtkinter")
+        return 0
     except tk.TclError as exc:
         print(f"{APP_NAME}: no graphical display available — cannot start the GUI "
               f"here ({exc}). This app is intended for the Windows desktop.")

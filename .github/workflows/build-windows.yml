@@ -20,9 +20,11 @@ jobs:
           pyinstaller --onefile --windowed --name QRToolkit
           --icon qr-toolkit.ico
           --version-file packaging/version.txt
+          --hidden-import qrkit.__main__
           --add-data "qr-toolkit.ico;."
           --collect-all cv2
           --collect-all barcode
+          --collect-all customtkinter
           --collect-submodules PIL
           qr_toolkit_app.py
       - name: Stage installer inputs
@@ -43,4 +45,10 @@ jobs:
           path: |
             dist/QRToolkit.exe
             packaging/dist/QRToolkit-Setup.exe
+          if-no-files-found: error
+      - name: Upload staging (for signed repack)
+        uses: actions/upload-artifact@v4
+        with:
+          name: qr-toolkit-staging
+          path: packaging/staging
           if-no-files-found: error
