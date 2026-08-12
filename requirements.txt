@@ -1,0 +1,5 @@
+# QR & Barcode Toolkit runtime deps — permissive/weak-copyleft only, no AGPL/proprietary.
+segno>=1.6
+python-barcode>=0.15
+opencv-python>=4.8
+Pillow>=10.4
