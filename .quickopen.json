@@ -1,13 +1,14 @@
 {
   "slug": "qr-toolkit",
   "name": "QR & Barcode Toolkit",
-  "tagline": "Generate and scan QR codes and barcodes \u2014 vCard, Wi-Fi, URL presets, batch, all offline.",
+  "tagline": "Generate and scan QR codes and barcodes — vCard, Wi-Fi, URL presets, batch, all offline.",
   "categorySlug": "url-link-tools",
   "license": "Apache-2.0",
   "description": "Generate QR codes (with presets for URL, Wi-Fi, vCard, email, SMS, geo, and plain text), and common 1D barcodes (EAN/UPC/Code128/Code39). Scan/decode QR codes from image files via OpenCV. Batch-generate from a CSV, control size/margin/error-correction, and export PNG/SVG. Fully offline.",
   "aiStack": "Python (tkinter + CLI), segno, python-barcode, OpenCV, Pillow",
   "platforms": [
-    "windows"
+    "windows",
+    "linux"
   ],
   "buildEntry": "qr_toolkit_app.py"
 }
