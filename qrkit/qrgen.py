@@ -50,7 +50,11 @@ def make_qr(data, out, scale=8, border=4, error="m", fmt="png"):
         raise QRKitError("border must be 0 or greater.")
 
     try:
-        qr = segno.make(str(data), error=err)
+        # micro=False is essential: segno.make() otherwise auto-selects a
+        # Micro QR (M1..M4) for short payloads at error levels l/m/q, and
+        # Micro QR cannot be decoded by OpenCV's detector or by most phone
+        # cameras -- short payloads would silently produce unscannable codes.
+        qr = segno.make(str(data), error=err, micro=False)
     except Exception as exc:
         raise QRKitError(f"Could not build the QR code: {exc}")
 

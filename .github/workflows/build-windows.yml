@@ -22,6 +22,7 @@ jobs:
           --version-file packaging/version.txt
           --add-data "qr-toolkit.ico;."
           --collect-all cv2
+          --collect-all barcode
           --collect-submodules PIL
           qr_toolkit_app.py
       - name: Stage installer inputs

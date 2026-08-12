@@ -79,6 +79,31 @@ def test_qr_roundtrip_scan(tmp_path, payload):
     assert payload in decoded
 
 
+@pytest.mark.parametrize("error", ["l", "m", "q", "h"])
+def test_qr_short_payload_roundtrip_every_error_level(tmp_path, error):
+    # Regression: segno.make() without micro=False emits a Micro QR (M1..M4)
+    # for short payloads at l/m/q, which OpenCV and most phone cameras cannot
+    # decode -- short QRs at DEFAULT settings came out unscannable.
+    out = tmp_path / "short.png"
+    make_qr("hello", str(out), error=error)  # default scale/border
+    assert scan_qr(str(out)) == ["hello"]
+
+
+def test_qr_never_micro(tmp_path, monkeypatch):
+    # the app must always ask segno for regular (non-micro) QR symbols
+    import segno
+    seen = {}
+    real_make = segno.make
+
+    def spy(data, **kw):
+        seen.update(kw)
+        return real_make(data, **kw)
+
+    monkeypatch.setattr(segno, "make", spy)
+    make_qr("hi", str(tmp_path / "m.png"), error="m")
+    assert seen.get("micro") is False
+
+
 def test_scan_missing_image_raises(tmp_path):
     with pytest.raises(QRKitError):
         scan_qr(str(tmp_path / "nope.png"))

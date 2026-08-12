@@ -563,6 +563,13 @@ def build_app():
             self._set_status(busy, kind="working")
             self._clear_result(keep_status=True)
 
+            # The worker thread must never touch tkinter (self.after from a
+            # non-main thread raises "main thread is not in main loop" and
+            # would leave _busy stuck forever).  It only fills a queue; the
+            # main thread polls it with self.after.
+            import queue
+            outcome = queue.Queue(maxsize=1)
+
             def run():
                 try:
                     res, err = work(), None
@@ -570,7 +577,7 @@ def build_app():
                     res, err = None, str(ex)
                 except Exception as ex:
                     res, err = None, f"Unexpected error: {ex}"
-                self.after(0, lambda: finish(res, err))
+                outcome.put((res, err))
 
             def finish(res, err):
                 self._busy = False
@@ -589,7 +596,16 @@ def build_app():
                 except Exception as ex:
                     self._show_error(f"Post-processing error: {ex}")
 
+            def poll():
+                try:
+                    res, err = outcome.get_nowait()
+                except queue.Empty:
+                    self.after(50, poll)
+                    return
+                finish(res, err)
+
             threading.Thread(target=run, daemon=True).start()
+            self.after(50, poll)
 
         # ---- result bar helpers
         def _set_status(self, text, kind="idle"):
@@ -688,7 +704,10 @@ def build_app():
             link.bind("<Button-1>", lambda e: open_with_default_app(PROJECT_URL))
             ttk.Button(frm, text="Close", command=win.destroy).pack(anchor="e")
             win.transient(self)
-            win.grab_set()
+            try:
+                win.grab_set()  # can raise "grab failed: window not viewable"
+            except tk.TclError:
+                pass
 
         # ---- image preview helper (Pillow -> ImageTk)
         def _show_preview(self, panel_id, label, path, max_side=340):
@@ -877,22 +896,31 @@ def build_app():
                 return preset_vcard(f)
             return preset_text("")
 
+        def _int_var(self, var, what):
+            """Read an IntVar backing a Spinbox; typed junk must not leak a
+            TclError traceback -- surface it as the app error instead."""
+            try:
+                return int(var.get())
+            except Exception:
+                raise QRKitError(f"{what} must be a whole number.")
+
         def _qr_opts(self):
             err = "m"
             for lbl, code in ERROR_LEVELS:
                 if lbl == self._qr_error_var.get():
                     err = code
-            return dict(scale=self._qr_scale.get(), border=self._qr_border.get(),
+            return dict(scale=self._int_var(self._qr_scale, "Scale"),
+                        border=self._int_var(self._qr_border, "Border"),
                         error=err)
 
         def _qr_preview(self):
             try:
                 payload = self._qr_build_payload()
+                opts = self._qr_opts()
             except QRKitError as ex:
                 self._show_error(str(ex))
                 return
             out = self._suggest_out("qr_preview", ".png")
-            opts = self._qr_opts()
 
             def work():
                 return make_qr(payload, out, fmt="png", **opts)
@@ -907,17 +935,16 @@ def build_app():
         def _qr_save(self, fmt):
             try:
                 payload = self._qr_build_payload()
+                opts = self._qr_opts()
             except QRKitError as ex:
                 self._show_error(str(ex))
                 return
-            mode = "save_svg" if fmt == "svg" else "save_png"
             ftypes = SVG_TYPES if fmt == "svg" else PNG_TYPES
             dest = filedialog.asksaveasfilename(
                 title=f"Save {fmt.upper()}", defaultextension="." + fmt,
                 filetypes=ftypes)
             if not dest:
                 return
-            opts = self._qr_opts()
 
             def work():
                 return make_qr(payload, dest, fmt=fmt, **opts)
@@ -1162,8 +1189,13 @@ def build_app():
             if not out_dir:
                 self._show_error("Choose an output folder.")
                 return
-            opts = dict(scale=self._batch_scale.get(), border=self._batch_border.get(),
-                        fmt=self._batch_fmt.get())
+            try:
+                opts = dict(scale=self._int_var(self._batch_scale, "Scale"),
+                            border=self._int_var(self._batch_border, "Border"),
+                            fmt=self._batch_fmt.get())
+            except QRKitError as ex:
+                self._show_error(str(ex))
+                return
 
             def work():
                 return batch_qr_from_csv(csv_path, out_dir, column,
