@@ -29,7 +29,7 @@ from .qrgen import (
 )
 from .scan import scan_qr
 
-__version__ = "1.0.0"
+__version__ = "1.0.7"
 
 __all__ = [
     "QRKitError",
