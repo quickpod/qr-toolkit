@@ -1,6 +1,6 @@
 ; Inno Setup — QR & Barcode Toolkit. Signed single-file installer, compiled in CI.
 #define AppName "QR & Barcode Toolkit"
-#define AppVersion "1.0.7"
+#define AppVersion "1.0.8"
 
 [Setup]
 AppMutex=QuickOpen.QRToolkit
@@ -42,7 +42,7 @@ WizardSmallImageFile=branding\wizard-small.bmp
 AppCopyright=Apache-2.0. 100%% AI-built, published on QuickOpen (quickopen.ai).
 VersionInfoCompany=QuickOpen
 VersionInfoProductName=QR & Barcode Toolkit
-VersionInfoVersion=1.0.7.0
+VersionInfoVersion=1.0.8.0
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesInstallIn64BitMode=x64compatible
